@@ -98,34 +98,10 @@ onnx_dir = snapshot_download(
     ]
 )
 
-## Load sessions with CoreML acceleration for Apple Silicon
-session_options = onnxruntime.SessionOptions()
-session_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
-
-# Use CoreML for GPU/Neural Engine acceleration on M-series chips
-providers = ['CoreMLExecutionProvider', 'CPUExecutionProvider']
-
-print("Loading models with CoreML acceleration...")
-vision_session = onnxruntime.InferenceSession(
-    os.path.join(onnx_dir, "onnx", vision_encoder_path),
-    sess_options=session_options,
-    providers=providers
-)
-embed_session = onnxruntime.InferenceSession(
-    os.path.join(onnx_dir, "onnx", embed_tokens_path),
-    sess_options=session_options,
-    providers=providers
-)
-decoder_session = onnxruntime.InferenceSession(
-    os.path.join(onnx_dir, "onnx", decoder_model_path),
-    sess_options=session_options,
-    providers=providers
-)
-
-# Print which providers are actually being used
-print(f"Vision encoder using: {vision_session.get_providers()}")
-print(f"Embed tokens using: {embed_session.get_providers()}")
-print(f"Decoder using: {decoder_session.get_providers()}")
+## Load sessions
+vision_session = onnxruntime.InferenceSession(os.path.join(onnx_dir, "onnx", vision_encoder_path))
+embed_session = onnxruntime.InferenceSession(os.path.join(onnx_dir, "onnx", embed_tokens_path))
+decoder_session = onnxruntime.InferenceSession(os.path.join(onnx_dir, "onnx", decoder_model_path))
 
 ## Set config values
 text_config = config.text_config
