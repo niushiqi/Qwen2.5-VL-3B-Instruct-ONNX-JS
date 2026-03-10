@@ -31,38 +31,35 @@ function processImage(image, config) {
   const mergeSize = config.merge_size || 2;
   const imageMean = config.image_mean || [0.48145466, 0.4578275, 0.40821073];
   const imageStd = config.image_std || [0.26862954, 0.26130258, 0.27577711];
-  
+
   const origWidth = image.width;
   const origHeight = image.height;
-  
-  // 计算调整后的尺寸
-  const aspectRatio = origWidth / origHeight;
-  let targetWidth, targetHeight;
-  
-  // 简化：基于 min/max pixels 计算目标尺寸
-  const totalPixels = origWidth * origHeight;
-  if (totalPixels < minPixels) {
-    const scale = Math.sqrt(minPixels / totalPixels);
-    targetWidth = Math.round(origWidth * scale);
-    targetHeight = Math.round(origHeight * scale);
-  } else if (totalPixels > maxPixels) {
-    const scale = Math.sqrt(maxPixels / totalPixels);
-    targetWidth = Math.round(origWidth * scale);
-    targetHeight = Math.round(origHeight * scale);
-  } else {
-    targetWidth = origWidth;
-    targetHeight = origHeight;
+
+  // smart_resize 的 factor 是 patch_size * merge_size
+  const factor = patchSize * mergeSize;
+
+  // smart_resize 逻辑
+  let hBar = Math.round(origHeight / factor) * factor;
+  let wBar = Math.round(origWidth / factor) * factor;
+
+  if (hBar * wBar > maxPixels) {
+    const beta = Math.sqrt((origHeight * origWidth) / maxPixels);
+    hBar = Math.max(factor, Math.floor(origHeight / beta / factor) * factor);
+    wBar = Math.max(factor, Math.floor(origWidth / beta / factor) * factor);
+  } else if (hBar * wBar < minPixels) {
+    const beta = Math.sqrt(minPixels / (origHeight * origWidth));
+    hBar = Math.ceil(origHeight * beta / factor) * factor;
+    wBar = Math.ceil(origWidth * beta / factor) * factor;
   }
-  
-  // 调整为 patch_size 的倍数
-  targetWidth = Math.round(targetWidth / patchSize) * patchSize;
-  targetHeight = Math.round(targetHeight / patchSize) * patchSize;
-  
+
+  const targetWidth = wBar;
+  const targetHeight = hBar;
+
   // 计算网格大小
   const gridH = targetHeight / patchSize;
   const gridW = targetWidth / patchSize;
-  const gridT = 1; // 单帧图像
-  
+  const gridT = 1;
+
   return {
     targetWidth,
     targetHeight,
@@ -78,57 +75,139 @@ function processImage(image, config) {
 }
 
 async function preprocessImage(imagePath, config) {
+  // 1. 读取图像
   const image = await RawImage.read(imagePath);
-  const processInfo = processImage(image, config);
-  
-  // Resize 图像
-  const resized = await image.resize(processInfo.targetWidth, processInfo.targetHeight);
-  
-  // 转换为 CHW 格式并归一化
+
+  // 2. 参数
+  const minPixels = config.min_pixels || 3136;
+  const maxPixels = config.max_pixels || 12845056;
+  const patchSize = config.patch_size || 14;
+  const temporalPatchSize = config.temporal_patch_size || 2;
+  const mergeSize = config.merge_size || 2;
+  const imageMean = config.image_mean || [0.48145466, 0.4578275, 0.40821073];
+  const imageStd = config.image_std || [0.26862954, 0.26130258, 0.27577711];
+  const rescaleFactor = 1 / 255;
+
+  const origHeight = image.height;
+  const origWidth = image.width;
+
+  // 3. smart_resize
+  const factor = patchSize * mergeSize;
+
+  // 检查宽高比
+  if (Math.max(origHeight, origWidth) / Math.min(origHeight, origWidth) > 200) {
+    throw new Error(`absolute aspect ratio must be smaller than 200, got ${Math.max(origHeight, origWidth) / Math.min(origHeight, origWidth)}`);
+  }
+
+  let hBar = Math.round(origHeight / factor) * factor;
+  let wBar = Math.round(origWidth / factor) * factor;
+
+  if (hBar * wBar > maxPixels) {
+    const beta = Math.sqrt((origHeight * origWidth) / maxPixels);
+    hBar = Math.max(factor, Math.floor(origHeight / beta / factor) * factor);
+    wBar = Math.max(factor, Math.floor(origWidth / beta / factor) * factor);
+  } else if (hBar * wBar < minPixels) {
+    const beta = Math.sqrt(minPixels / (origHeight * origWidth));
+    hBar = Math.ceil(origHeight * beta / factor) * factor;
+    wBar = Math.ceil(origWidth * beta / factor) * factor;
+  }
+
+  const resizedHeight = hBar;
+  const resizedWidth = wBar;
+
+  // 4. Resize (bicubic)
+  const resized = await image.resize(resizedWidth, resizedHeight, { resample: 3 });
   const { width, height, channels } = resized;
-  const data = resized.data;
-  
-  // 提取 patches
-  const patchSize = processInfo.patchSize;
-  const numPatchesH = processInfo.gridH;
-  const numPatchesW = processInfo.gridW;
-  const numPatches = numPatchesH * numPatchesW;
-  
-  // 每个 patch 的维度
-  const patchDim = channels * processInfo.temporalPatchSize * patchSize * patchSize;
-  const pixelValues = new Float32Array(numPatches * patchDim);
-  
-  let patchIdx = 0;
-  for (let ph = 0; ph < numPatchesH; ph++) {
-    for (let pw = 0; pw < numPatchesW; pw++) {
-      const startY = ph * patchSize;
-      const startX = pw * patchSize;
-      
-      let offset = 0;
-      // 提取 patch (CHW 格式)
-      for (let c = 0; c < channels; c++) {
-        for (let y = 0; y < patchSize; y++) {
-          for (let x = 0; x < patchSize; x++) {
-            const pixelY = startY + y;
-            const pixelX = startX + x;
-            const pixelIdx = (pixelY * width + pixelX) * channels + c;
-            
-            // 归一化
-            const pixelValue = data[pixelIdx] / 255.0;
-            const normalized = (pixelValue - processInfo.imageMean[c]) / processInfo.imageStd[c];
-            
-            pixelValues[patchIdx * patchDim + offset] = normalized;
-            offset++;
+  const data = resized.data;  // HWC 格式
+
+  // 5. Rescale + Normalize + 转 CHW (data_format = ChannelDimension.FIRST)
+  const processedImage = new Float32Array(channels * height * width);
+
+  for (let c = 0; c < channels; c++) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const hwcIdx = (y * width + x) * channels + c;
+        const chwIdx = c * height * width + y * width + x;
+
+        // Rescale
+        const rescaled = data[hwcIdx] * rescaleFactor;
+
+        // Normalize
+        const normalized = (rescaled - imageMean[c]) / imageStd[c];
+
+        processedImage[chwIdx] = normalized;
+      }
+    }
+  }
+
+  // 6. patches = np.array([processedImage])
+  // 对于单张图片，patches shape: (1, C, H, W)
+  let numImages = 1;
+  let patches = new Float32Array(numImages * channels * height * width);
+  patches.set(processedImage, 0);
+
+  // 7. 填充到 temporal_patch_size 的倍数
+  if (numImages % temporalPatchSize !== 0) {
+    const repeatsNeeded = temporalPatchSize - (numImages % temporalPatchSize);
+    const newPatches = new Float32Array((numImages + repeatsNeeded) * channels * height * width);
+    newPatches.set(patches, 0);
+
+    // 重复最后一张图
+    for (let i = 0; i < repeatsNeeded; i++) {
+      newPatches.set(processedImage, (numImages + i) * channels * height * width);
+    }
+
+    patches = newPatches;
+    numImages += repeatsNeeded;
+  }
+
+  // 8. 计算 grid
+  const gridT = Math.floor(numImages / temporalPatchSize);
+  const gridH = Math.floor(resizedHeight / patchSize);
+  const gridW = Math.floor(resizedWidth / patchSize);
+  const channel = channels;
+
+  // 9. Reshape + Transpose + Flatten
+  // Reshape: (numImages, C, H, W) -> (grid_t, temporal_patch_size, channel, grid_h//merge_size, merge_size, patch_size, grid_w//merge_size, merge_size, patch_size)
+  // Transpose: (0, 3, 6, 4, 7, 2, 1, 5, 8)
+  // Flatten: (grid_t * grid_h * grid_w, channel * temporal_patch_size * patch_size * patch_size)
+
+  const numPatches = gridT * gridH * gridW;
+  const patchDim = channel * temporalPatchSize * patchSize * patchSize;
+  const flattenPatches = new Float32Array(numPatches * patchDim);
+
+  // 直接按照 transpose 后的顺序遍历并填充
+  let outputIdx = 0;
+
+  for (let t = 0; t < gridT; t++) {
+    for (let gh = 0; gh < gridH / mergeSize; gh++) {
+      for (let gw = 0; gw < gridW / mergeSize; gw++) {
+        for (let mh = 0; mh < mergeSize; mh++) {
+          for (let mw = 0; mw < mergeSize; mw++) {
+            for (let c = 0; c < channel; c++) {
+              for (let tp = 0; tp < temporalPatchSize; tp++) {
+                for (let ph = 0; ph < patchSize; ph++) {
+                  for (let pw = 0; pw < patchSize; pw++) {
+                    // 计算在原始 patches 中的位置
+                    const imageIdx = t * temporalPatchSize + tp;
+                    const y = (gh * mergeSize + mh) * patchSize + ph;
+                    const x = (gw * mergeSize + mw) * patchSize + pw;
+                    const srcIdx = imageIdx * channel * height * width + c * height * width + y * width + x;
+
+                    flattenPatches[outputIdx++] = patches[srcIdx];
+                  }
+                }
+              }
+            }
           }
         }
       }
-      patchIdx++;
     }
   }
-  
+
   return {
-    pixelValues,
-    imageGridThw: [processInfo.gridT, processInfo.gridH, processInfo.gridW],
+    pixelValues: flattenPatches,
+    imageGridThw: [gridT, gridH, gridW],
     numPatches,
     patchDim
   };
@@ -259,31 +338,27 @@ const tokenizer = await AutoTokenizer.from_pretrained(MODEL_DIR, {
 });
 
 console.log('预处理图像...');
-// 直接使用 Python processor 计算出的尺寸
-// 从 debug 输出我们知道：pixel_values shape: (5476, 1176), image_grid_thw: [[1, 74, 74]]
-const imageData = {
-  imageGridThw: [1, 74, 74],
-  numPatches: 5476,
-  patchDim: 1176
-};
+const imagePath = './34599220_182808366107_2.jpg';
+const image = await RawImage.read(imagePath);
+const processInfo = processImage(image, preprocessorConfig);
 
-// 使用 RawImage 读取并处理图像
-const image = await RawImage.read('./test.jpg');
-// 计算目标尺寸：74 * 14 = 1036
-const targetSize = 74 * 14; // 1036x1036
-const resized = await image.resize(targetSize, targetSize);
+// Resize 图像
+const resized = await image.resize(processInfo.targetWidth, processInfo.targetHeight);
 
 // 提取 patches 并归一化
 const { width, height, channels } = resized;
 const data = resized.data;
-const patchSize = 14;
-const numPatchesH = 74;
-const numPatchesW = 74;
+const patchSize = processInfo.patchSize;
+const temporalPatchSize = processInfo.temporalPatchSize;
+const numPatchesH = processInfo.gridH;
+const numPatchesW = processInfo.gridW;
+const numPatches = numPatchesH * numPatchesW;
 
-const imageMean = [0.48145466, 0.4578275, 0.40821073];
-const imageStd = [0.26862954, 0.26130258, 0.27577711];
+// 每个 patch 的维度：channels * temporalPatchSize * patchSize * patchSize
+const patchDim = channels * temporalPatchSize * patchSize * patchSize;
+const pixelValues = new Float32Array(numPatches * patchDim);
 
-const pixelValues = new Float32Array(imageData.numPatches * imageData.patchDim);
+console.log(`图像尺寸: ${width}x${height}, 网格: ${numPatchesH}x${numPatchesW}, patchDim: ${patchDim}`);
 
 let patchIdx = 0;
 for (let ph = 0; ph < numPatchesH; ph++) {
@@ -292,19 +367,21 @@ for (let ph = 0; ph < numPatchesH; ph++) {
     const startX = pw * patchSize;
     
     let offset = 0;
-    // CHW 格式
+    // CHW 格式，加上时间维度重复
     for (let c = 0; c < channels; c++) {
-      for (let y = 0; y < patchSize; y++) {
-        for (let x = 0; x < patchSize; x++) {
-          const pixelY = startY + y;
-          const pixelX = startX + x;
-          const pixelIdx = (pixelY * width + pixelX) * channels + c;
-          
-          const pixelValue = data[pixelIdx] / 255.0;
-          const normalized = (pixelValue - imageMean[c]) / imageStd[c];
-          
-          pixelValues[patchIdx * imageData.patchDim + offset] = normalized;
-          offset++;
+      for (let t = 0; t < temporalPatchSize; t++) {
+        for (let y = 0; y < patchSize; y++) {
+          for (let x = 0; x < patchSize; x++) {
+            const pixelY = startY + y;
+            const pixelX = startX + x;
+            const pixelIdx = (pixelY * width + pixelX) * channels + c;
+            
+            const pixelValue = data[pixelIdx] / 255.0;
+            const normalized = (pixelValue - processInfo.imageMean[c]) / processInfo.imageStd[c];
+            
+            pixelValues[patchIdx * patchDim + offset] = normalized;
+            offset++;
+          }
         }
       }
     }
@@ -312,14 +389,19 @@ for (let ph = 0; ph < numPatchesH; ph++) {
   }
 }
 
-imageData.pixelValues = pixelValues;
+const imageData = {
+  pixelValues,
+  imageGridThw: [processInfo.gridT, processInfo.gridH, processInfo.gridW],
+  numPatches,
+  patchDim
+};
 
 console.log('准备文本输入...');
 const messages = [
   {
     role: "user",
     content: [
-      { type: "image", image: "./34599220_182808366107_2.jpg" },
+      { type: "image", image: "./test.jpg" },
       { type: "text", text: "描述这个图片内容，用中文回答。" }
     ]
   }
@@ -339,26 +421,20 @@ const numImageTokens = Math.floor((gridT * gridH * gridW) / (mergeSize * mergeSi
 
 console.log(`图像 tokens 数量: ${numImageTokens}`);
 
-// 替换 <|image_pad|> 为多个图像 token
-// 直接构建 token ids 而不是文本
-const textBeforeImage = tokenizer.apply_chat_template([{
-  role: "user",
-  content: [{ type: "text", text: "" }]
-}], { add_generation_prompt: false, tokenize: false });
+// 构建正确的 input_ids
+// 格式：<|im_start|>system\n...<|im_end|>\n<|im_start|>user\n<|vision_start|><image_tokens><|vision_end|>文本<|im_end|>\n<|im_start|>assistant\n
+const part1 = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|>";
+const part2 = "<|vision_end|>描述这个图片内容，用中文回答。<|im_end|>\n<|im_start|>assistant\n";
 
-const textAfterImage = "描述这个图片内容，用中文回答。<|im_end|>\n<|im_start|>assistant\n";
+const tokens1 = tokenizer(part1, { return_tensors: 'pt' });
+const tokens2 = tokenizer(part2, { return_tensors: 'pt' });
 
-const tokensBeforeImage = tokenizer(textBeforeImage.replace("<|im_end|>", "<|vision_start|>"), { return_tensors: 'pt' });
-const tokensAfterImage = tokenizer("<|vision_end|>" + textAfterImage, { return_tensors: 'pt' });
+const ids1 = Array.from(tokens1.input_ids.data).map(x => Number(x));
+const ids2 = Array.from(tokens2.input_ids.data).map(x => Number(x));
 
-const inputIdsBeforeImage = Array.from(tokensBeforeImage.input_ids.data).map(x => Number(x));
-const inputIdsAfterImage = Array.from(tokensAfterImage.input_ids.data).map(x => Number(x));
-
-// 构建完整的 input_ids：before + image_tokens + after
+// 构建完整的 input_ids：part1 + image_tokens + part2
 const imageTokens = new Array(numImageTokens).fill(imageTokenId);
-const fullInputIds = [...inputIdsBeforeImage, ...imageTokens, ...inputIdsAfterImage];
-
-const inputIds = fullInputIds;
+const inputIds = [...ids1, ...imageTokens, ...ids2];
 const attentionMask = new Array(inputIds.length).fill(1);
 
 console.log(`总 token 数: ${inputIds.length}, 其中图像 tokens: ${numImageTokens}`);
