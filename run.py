@@ -1,5 +1,6 @@
 import itertools
 import os
+import time
 import numpy as np
 import onnxruntime
 
@@ -98,10 +99,23 @@ onnx_dir = snapshot_download(
     ]
 )
 
-## Load sessions
-vision_session = onnxruntime.InferenceSession(os.path.join(onnx_dir, "onnx", vision_encoder_path))
-embed_session = onnxruntime.InferenceSession(os.path.join(onnx_dir, "onnx", embed_tokens_path))
-decoder_session = onnxruntime.InferenceSession(os.path.join(onnx_dir, "onnx", decoder_model_path))
+## Load sessions - try different providers for M-series acceleration
+# CoreML has issues with this model, so we'll use CPU with optimizations
+# You can also try installing onnxruntime-silicon for better M-series support
+providers = ['CPUExecutionProvider']
+
+vision_session = onnxruntime.InferenceSession(
+    os.path.join(onnx_dir, "onnx", vision_encoder_path),
+    providers=providers
+)
+embed_session = onnxruntime.InferenceSession(
+    os.path.join(onnx_dir, "onnx", embed_tokens_path),
+    providers=providers
+)
+decoder_session = onnxruntime.InferenceSession(
+    os.path.join(onnx_dir, "onnx", decoder_model_path),
+    providers=providers
+)
 
 ## Set config values
 text_config = config.text_config
@@ -118,8 +132,8 @@ messages = [
     {
         "role": "user",
         "content": [
-            {"type": "image", "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"},
-            {"type": "text", "text": "Describe this image."}
+            {"type": "image", "image": "./34599220_182808366107_2.jpg"},
+            {"type": "text", "text": "描述这个图片内容，用中文回答。"}
         ]
     },
 ]
@@ -165,12 +179,19 @@ generated_tokens = np.array([[]], dtype=np.int64)
 image_features = None
 
 print("Generating...")
+start_time = time.time()
+token_times = []
+
 for step in range(max_new_tokens):
+    step_start = time.time()
+    
     ## Generate text embeddings
     inputs_embeds = embed_session.run(None, {'input_ids': input_ids})[0]
 
     ## Compute and inject vision features (only on the very first step)
     if image_features is None and "pixel_values" in inputs:
+        print("Processing image (this may take 30-60s on first run)...", flush=True)
+        vision_start = time.time()
         vision_inputs = {"pixel_values": inputs["pixel_values"]}
         vision_input_names = {inp.name for inp in vision_session.get_inputs()}
 
@@ -178,7 +199,9 @@ for step in range(max_new_tokens):
             if optional_input in vision_input_names and optional_input in inputs:
                 vision_inputs[optional_input] = inputs[optional_input]
 
+        print("Running vision encoder...", flush=True)
         image_features = vision_session.run(None, vision_inputs)[0]
+        print(f"✓ Image processed in {time.time() - vision_start:.2f}s", flush=True)
 
         # Merge vision embeddings into the text embedding sequence
         inputs_embeds[input_ids == image_token_id] = image_features.reshape(-1, image_features.shape[-1])
@@ -208,12 +231,27 @@ for step in range(max_new_tokens):
 
     generated_tokens = np.concatenate([generated_tokens, input_ids], axis=-1)
 
+    step_time = time.time() - step_start
+    token_times.append(step_time)
+    
+    ## Calculate and display speed stats
+    if step > 0:  # Skip first token as it's usually slower
+        avg_time = np.mean(token_times[1:])
+        tokens_per_sec = 1.0 / avg_time if avg_time > 0 else 0
+        print(f"\rToken {step+1} | {tokens_per_sec:.2f} tok/s | {step_time:.3f}s ", end='', flush=True)
+
     ## (Optional) Streaming
-    print(processor.decode(input_ids[0]), end='', flush=True)
+    decoded = processor.decode(input_ids[0])
+    if decoded.strip():  # Only print non-empty tokens
+        print(decoded, end='', flush=True)
 
     if np.isin(input_ids, eos_token_id).all():
         break
-print()
+
+total_time = time.time() - start_time
+print(f"\n\nTotal time: {total_time:.2f}s")
+print(f"Tokens generated: {len(generated_tokens[0])}")
+print(f"Average speed: {len(generated_tokens[0]) / total_time:.2f} tok/s")
 
 
 # 4. Output result
