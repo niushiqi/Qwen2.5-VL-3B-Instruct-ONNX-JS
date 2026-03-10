@@ -338,7 +338,7 @@ const tokenizer = await AutoTokenizer.from_pretrained(MODEL_DIR, {
 });
 
 console.log('预处理图像...');
-const imagePath = './34599220_182808366107_2.jpg';
+const imagePath = './test.jpg';
 const image = await RawImage.read(imagePath);
 const processInfo = processImage(image, preprocessorConfig);
 
@@ -361,31 +361,40 @@ const pixelValues = new Float32Array(numPatches * patchDim);
 console.log(`图像尺寸: ${width}x${height}, 网格: ${numPatchesH}x${numPatchesW}, patchDim: ${patchDim}`);
 
 let patchIdx = 0;
-for (let ph = 0; ph < numPatchesH; ph++) {
-  for (let pw = 0; pw < numPatchesW; pw++) {
-    const startY = ph * patchSize;
-    const startX = pw * patchSize;
-    
-    let offset = 0;
-    // CHW 格式，加上时间维度重复
-    for (let c = 0; c < channels; c++) {
-      for (let t = 0; t < temporalPatchSize; t++) {
-        for (let y = 0; y < patchSize; y++) {
-          for (let x = 0; x < patchSize; x++) {
-            const pixelY = startY + y;
-            const pixelX = startX + x;
-            const pixelIdx = (pixelY * width + pixelX) * channels + c;
-            
-            const pixelValue = data[pixelIdx] / 255.0;
-            const normalized = (pixelValue - processInfo.imageMean[c]) / processInfo.imageStd[c];
-            
-            pixelValues[patchIdx * patchDim + offset] = normalized;
-            offset++;
+const patchMergeSize = processInfo.mergeSize;
+
+// 按照 merge_size 分组的顺序提取 patch
+for (let gh = 0; gh < numPatchesH / patchMergeSize; gh++) {
+  for (let gw = 0; gw < numPatchesW / patchMergeSize; gw++) {
+    for (let mh = 0; mh < patchMergeSize; mh++) {
+      for (let mw = 0; mw < patchMergeSize; mw++) {
+        const ph = gh * patchMergeSize + mh;
+        const pw = gw * patchMergeSize + mw;
+        const startY = ph * patchSize;
+        const startX = pw * patchSize;
+        
+        let offset = 0;
+        // CHW 格式，加上时间维度重复
+        for (let c = 0; c < channels; c++) {
+          for (let t = 0; t < temporalPatchSize; t++) {
+            for (let y = 0; y < patchSize; y++) {
+              for (let x = 0; x < patchSize; x++) {
+                const pixelY = startY + y;
+                const pixelX = startX + x;
+                const pixelIdx = (pixelY * width + pixelX) * channels + c;
+                
+                const pixelValue = data[pixelIdx] / 255.0;
+                const normalized = (pixelValue - processInfo.imageMean[c]) / processInfo.imageStd[c];
+                
+                pixelValues[patchIdx * patchDim + offset] = normalized;
+                offset++;
+              }
+            }
           }
         }
+        patchIdx++;
       }
     }
-    patchIdx++;
   }
 }
 
