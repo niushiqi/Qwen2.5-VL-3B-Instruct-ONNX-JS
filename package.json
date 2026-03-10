@@ -1,0 +1,14 @@
+{
+  "name": "qwen2-vl-js",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Qwen2.5-VL JavaScript implementation",
+  "main": "run.js",
+  "scripts": {
+    "start": "node run.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.3.1",
+    "onnxruntime-node": "^1.20.1"
+  }
+}
