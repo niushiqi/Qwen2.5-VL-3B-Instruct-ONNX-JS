@@ -133,6 +133,7 @@ messages = [
         "role": "user",
         "content": [
             {"type": "image", "image": "./34599220_182808366107_2.jpg"},
+            #{"type": "image", "image": "./test.jpg"},
             {"type": "text", "text": "描述这个图片内容，用中文回答。"}
         ]
     },
@@ -249,11 +250,20 @@ for step in range(max_new_tokens):
         break
 
 total_time = time.time() - start_time
-print(f"\n\nTotal time: {total_time:.2f}s")
-print(f"Tokens generated: {len(generated_tokens[0])}")
-print(f"Average speed: {len(generated_tokens[0]) / total_time:.2f} tok/s")
+total_tokens = len(generated_tokens[0])
+avg_speed = total_tokens / total_time if total_time > 0 else 0
+
+print(f"\n\n{'='*60}")
+print(f"Generation Statistics:")
+print(f"{'='*60}")
+print(f"Total tokens generated: {total_tokens}")
+print(f"Total time: {total_time:.2f}s")
+print(f"Average speed: {avg_speed:.2f} tok/s")
+print(f"{'='*60}")
 
 
 # 4. Output result
 print("\n--- Final Decoded Output ---")
-print(processor.decode(generated_tokens[0], skip_special_tokens=True))
+final_output = processor.decode(generated_tokens[0], skip_special_tokens=True)
+print(final_output)
+print(f"\n--- Output Length: {len(final_output)} characters ---")
