@@ -2,8 +2,9 @@ import * as ort from 'onnxruntime-node';
 import { AutoTokenizer, RawImage } from '@huggingface/transformers';
 import fs from 'fs/promises';
 import path from 'path';
+import os from 'os';
 
-const MODEL_DIR = '/Users/mindtower/.cache/modelscope/hub/models/onnx-community/Qwen2___5-VL-3B-Instruct-ONNX';
+const MODEL_DIR = path.join(os.homedir(), '.cache/modelscope/hub/models/onnx-community/Qwen2___5-VL-3B-Instruct-ONNX');
 const ONNX_DIR = path.join(MODEL_DIR, 'onnx');
 
 const config = JSON.parse(await fs.readFile(path.join(MODEL_DIR, 'config.json'), 'utf-8'));
